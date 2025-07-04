@@ -1,91 +1,68 @@
-import os
-import fitz  # PyMuPDF
-from dotenv import load_dotenv
+# main.py
+
+from PyPDF2 import PdfReader
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain.embeddings import HuggingFaceEmbeddings
-from langchain.chains import RetrievalQA
-from langchain_community.llms import HuggingFaceHub  # using HF LLM instead of OpenAI
+from langchain.schema import Document
+import os
 
-# Step 1: Extract text from PDF
-def extract_text_from_pdf(pdf_path):
-    print(f"Looking for PDF at: {pdf_path}")
-    doc = fitz.open(pdf_path)
-    full_text = ""
-    for page in doc:
-        full_text += page.get_text()
-    print(f"Extracted text length: {len(full_text)}")
-    return full_text
+PDF_PATH = "Chatbot_nie/doc/4thsem_syllabus.pdf"
+VECTOR_DB_DIR = "faiss_index"
+MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
-# Step 2: Split text into chunks
-def split_text_into_chunks(text, chunk_size=1000, chunk_overlap=100):
+def extract_text_from_pdf(path):
+    print(f"Looking for PDF at: {path}")
+    reader = PdfReader(path)
+    text = "\n".join([page.extract_text() for page in reader.pages])
+    print(f"Extracted text length: {len(text)}")
+    return text
+
+def split_text(text):
     print("Splitting text into chunks...")
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap
-    )
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_text(text)
     print(f"Number of chunks: {len(chunks)}")
     return chunks
 
-# Step 3: Create vector store from chunks
 def create_vector_store(chunks):
     print("Creating vector store using Hugging Face embeddings...")
-    model_name = "sentence-transformers/all-MiniLM-L6-v2"
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
-    vectorstore = FAISS.from_texts(chunks, embedding=embeddings)
+    embeddings = HuggingFaceEmbeddings(model_name=MODEL_NAME)
+    docs = [Document(page_content=chunk, metadata={"source": "4thsem_syllabus.pdf"}) for chunk in chunks]
+    vectorstore = FAISS.from_documents(docs, embedding=embeddings)
+    vectorstore.save_local(VECTOR_DB_DIR)
+    print("Vector store created and saved.")
     return vectorstore
 
-# Step 4: Build QA system using Hugging Face LLM
-def build_qa_system(vectorstore):
-    print("Setting up RetrievalQA with HuggingFace LLM...")
+def load_vector_store():
+    print("Loading existing vector store...")
+    embeddings = HuggingFaceEmbeddings(model_name=MODEL_NAME)
+    return FAISS.load_local(VECTOR_DB_DIR, embeddings, allow_dangerous_deserialization=True)
 
-    # Use Hugging Face hosted model (like flan-t5 or any other supported one)
-    llm = HuggingFaceHub(repo_id="google/flan-t5-base", model_kwargs={"temperature": 0.5, "max_length": 512})
+def chatbot_query(vectorstore, query):
+    results = vectorstore.similarity_search(query, k=3)
+    if not results:
+        return "Sorry, this question is out of scope."
+    
+    response = "\n\n".join([f"From {r.metadata['source']}:\n{r.page_content}" for r in results])
+    return f"Based on the documents:\n\n{response}"
 
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=vectorstore.as_retriever(),
-        chain_type="stuff"
-    )
-    return qa
-
-# Step 5: Chat with the bot
-def ask_questions(qa):
-    print("\nYou can now ask questions about the syllabus.")
-    print("Type 'exit' to stop.")
-    while True:
-        query = input("\nYou: ")
-        if query.lower() == "exit":
-            print("Exiting chatbot.")
-            break
-        response = qa.run(query)
-        print(f"\nChatbot: {response}")
-
-# Main function
 def main():
-    load_dotenv()
+    if not os.path.exists(VECTOR_DB_DIR):
+        text = extract_text_from_pdf(PDF_PATH)
+        chunks = split_text(text)
+        vectorstore = create_vector_store(chunks)
+    else:
+        vectorstore = load_vector_store()
 
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    syllabus_path = os.path.join(BASE_DIR, "doc", "4thsem_syllabus.pdf")
-
-    # Step 1
-    text = extract_text_from_pdf(syllabus_path)
-    if not text.strip():
-        print("❌ No text found in PDF. Please check the file.")
-        return
-
-    # Step 2
-    chunks = split_text_into_chunks(text)
-
-    # Step 3
-    vectorstore = create_vector_store(chunks)
-
-    # Step 4
-    qa = build_qa_system(vectorstore)
-
-    # Step 5
-    ask_questions(qa)
+    print("\n📘 Chatbot is ready. Type your question (or 'exit' to quit):")
+    while True:
+        query = input("\n🧠 You: ")
+        if query.lower() in ("exit", "quit"):
+            print("👋 Exiting chatbot.")
+            break
+        response = chatbot_query(vectorstore, query)
+        print(f"\n🤖 Bot: {response}")
 
 if __name__ == "__main__":
     main()
